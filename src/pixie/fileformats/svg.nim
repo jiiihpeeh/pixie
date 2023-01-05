@@ -1,7 +1,7 @@
 ## Load SVG files.
 
 import chroma, pixie/common, pixie/images, pixie/internal, pixie/paints,
-    pixie/paths, strutils, tables, vmath, xmlparser, xmltree
+    pixie/paths, vmath, std/[strtabs, tables, strutils, xmlparser, xmltree, enumerate]
 
 when defined(pixieDebugSvg):
   import strtabs
@@ -15,6 +15,8 @@ type
     width*, height*: int
     elements: seq[(Path, SvgProperties)]
     linearGradients: Table[string, LinearGradient]
+    idReferences: Table[string, XmlNode]
+
 
   SvgProperties = object
     display: bool
@@ -35,6 +37,8 @@ type
 
 template failInvalid() =
   raise newException(PixieError, "Invalid SVG data")
+
+
 
 proc attrOrDefault(node: XmlNode, name, default: string): string =
   result = node.attr(name)
@@ -299,12 +303,17 @@ proc parseSvgProperties(node: XmlNode, inherited: SvgProperties): SvgProperties 
       else:
         failInvalidTransform(transform)
 
+
 proc parseSvgElement(
   node: XmlNode, svg: Svg, propertiesStack: var seq[SvgProperties]
 ): seq[(Path, SvgProperties)] =
   if node.kind != xnElement:
     # Skip <!-- comments -->
     return
+
+  #id references for use tags
+  if node.attr("id") != "":
+    svg.idReferences[node.attr("id")] = node
 
   case node.tag:
   of "title", "desc":
@@ -495,9 +504,57 @@ proc parseSvgElement(
         raise newException(PixieError, "Unexpected SVG tag: " & child.tag)
 
     svg.linearGradients[id] = linearGradient
+  of "use":
+    #So far axis movements should apply at least. This method generates a new node from previous information.
+    var idRefVal = node.attr("href")
+    if idRefVal == "":
+      idRefVal = node.attr("xlink:href")
+    if idRefVal == "":
+      raise newException(
+        PixieError, "Use Node reference not found"
+        )
+    if idRefVal[0] != '#':
+      raise newException(
+            PixieError, "Invalid node href"
+      )
+    let idRef = idRefVal[1..^1]
+    if not svg.idReferences.hasKey(idRef):
+      #Should the error ever be raised here?
+      raise newException(
+        PixieError, "Unknown use reference"
+      )
+    let referenceNode = svg.idReferences[idRef]
 
+    var
+      newNode = newElement(referenceNode.tag)
+      att = attrs(node)
+    att.del("href")
+    att.del("xlink:href")
+
+    let
+      x = parseFloat(att.getOrDefault("x","0")).float32
+      y = parseFloat(att.getOrDefault("y","0")).float32
+      trMatrix =  mat3(1.0, 0.0, 0.0,0.0, 1.0, 0.0,x, y, 1.0)
+ 
+    att.del("x")
+    att.del("y")
+    for k,v in pairs(referenceNode.attrs):
+      att[k] =v
+    att.del("id")
+    newNode.attrs = att
+
+    var newProps = @[initSvgProperties()]
+
+    result = parseSvgElement(newNode, svg, newProps)
+    for i, r in enumerate(result):
+      let path = r[0]
+      path.transform(trMatrix)
+      result[i][0] = path
+    
   else:
     raise newException(PixieError, "Unsupported SVG tag: " & node.tag)
+
+
 
 proc parseSvg*(
   data: string | XmlNode, width = 0, height = 0
@@ -507,34 +564,33 @@ proc parseSvg*(
     let root = parseXml(data)
     if root.tag != "svg":
       failInvalid()
-
     let
       viewBox = root.attr("viewBox")
       box = viewBox.split(" ")
-      viewBoxMinX = parseInt(box[0])
-      viewBoxMinY = parseInt(box[1])
-      viewBoxWidth = parseInt(box[2])
-      viewBoxHeight = parseInt(box[3])
+      viewBoxMinX = parseFloat(box[0]).float32
+      viewBoxMinY = parseFloat(box[1]).float32
+      viewBoxWidth = parseFloat(box[2]).float32
+      viewBoxHeight = parseFloat(box[3]).float32
 
     var rootProps = initSvgProperties()
     rootProps = root.parseSvgProperties(rootProps)
 
     if viewBoxMinX != 0 or viewBoxMinY != 0:
-      let viewBoxMin = vec2(-viewBoxMinX.float32, -viewBoxMinY.float32)
+      let viewBoxMin = vec2(-viewBoxMinX , -viewBoxMinY)
       rootprops.transform = rootprops.transform * translate(viewBoxMin)
 
     result = Svg()
 
     if width == 0 and height == 0: # Default to the view box size
-      result.width = viewBoxWidth
-      result.height = viewBoxHeight
+      result.width = viewBoxWidth.ceil.int
+      result.height = viewBoxHeight.ceil.int
     else:
       result.width = width
       result.height = height
 
       let
-        scaleX = width.float32 / viewBoxWidth.float32
-        scaleY = height.float32 / viewBoxHeight.float32
+        scaleX = width.float32 / viewBoxWidth
+        scaleY = height.float32 / viewBoxHeight
       rootprops.transform = rootprops.transform * scale(vec2(scaleX, scaleY))
 
     var propertiesStack = @[rootProps]
