@@ -1,7 +1,7 @@
 ## Load SVG files.
 
-import chroma, pixie/common, pixie/images, pixie/internal, pixie/paints,
-    pixie/paths, vmath, std/[strtabs, tables, strutils, xmlparser, xmltree, enumerate]
+import chroma, pixie/[common, images, internal, paints, paths],
+  vmath, std/[strtabs, tables, strutils, xmlparser, xmltree, enumerate]
 
 when defined(pixieDebugSvg):
   import strtabs
@@ -11,11 +11,13 @@ const
   svgSignature* = "<svg"
 
 type
+  Elements = seq[(Path, SvgProperties)]
   Svg* = ref object
     width*, height*: int
-    elements: seq[(Path, SvgProperties)]
+    elements: Elements
     linearGradients: Table[string, LinearGradient]
     idReferences: Table[string, XmlNode]
+    symbols: Table[string, Elements]
 
 
   SvgProperties = object
@@ -304,6 +306,9 @@ proc parseSvgProperties(node: XmlNode, inherited: SvgProperties): SvgProperties 
         failInvalidTransform(transform)
 
 
+
+
+
 proc parseSvgElement(
   node: XmlNode, svg: Svg, propertiesStack: var seq[SvgProperties]
 ): seq[(Path, SvgProperties)] =
@@ -319,9 +324,9 @@ proc parseSvgElement(
   of "title", "desc":
     discard
 
-  of "defs":
-    when defined(pixieDebugSvg):
-      echo node
+  # of "defs":
+  #   when defined(pixieDebugSvg):
+  #     echo node
 
   of "g":
     let props = node.parseSvgProperties(propertiesStack[^1])
@@ -534,7 +539,7 @@ proc parseSvgElement(
     let
       x = parseFloat(att.getOrDefault("x","0")).float32
       y = parseFloat(att.getOrDefault("y","0")).float32
-      trMatrix =  mat3(1.0, 0.0, 0.0,0.0, 1.0, 0.0,x, y, 1.0)
+      trMatrix =  mat3(1, 0.0, 0.0,0.0, 1, 0.0,x, y, 1.0)
  
     att.del("x")
     att.del("y")
@@ -543,17 +548,34 @@ proc parseSvgElement(
     att.del("id")
     newNode.attrs = att
 
-    var newProps = @[initSvgProperties()]
-
-    result = parseSvgElement(newNode, svg, newProps)
+    var props = @[node.parseSvgProperties(propertiesStack[^1])]
+    
+    result = parseSvgElement(newNode, svg, props)
     for i, r in enumerate(result):
       let path = r[0]
       path.transform(trMatrix)
       result[i][0] = path
-    
+
+  of "symbol":
+    var copyNode = node 
+    #tag name gets changed for further need see below
+    copyNode.tag = "svg"
+    echo copyNode
+    svg.idReferences[copyNode.attr("id")] = copyNode
+    echo svg.idReferences
+    #let svgtmp = parseSvgXml(copyNode)
+
+  of "svg":
+    #this implements symbol tag handling
+    echo "symbol not implemented"
+    discard
+  of "defs":
+    for n in node:
+      if n.attr("id") != "" and (not n.tag.endsWith("Gradient")):
+        svg.idReferences[n.attr("id")] = n
+    #echo svg.idReferences
   else:
     raise newException(PixieError, "Unsupported SVG tag: " & node.tag)
-
 
 
 proc parseSvg*(
@@ -595,7 +617,9 @@ proc parseSvg*(
 
     var propertiesStack = @[rootProps]
     for node in root.items:
-      result.elements.add node.parseSvgElement(result, propertiesStack)
+      var element = node.parseSvgElement(result, propertiesStack)
+      result.elements.add element
+
   except PixieError as e:
     raise e
   except:
@@ -631,7 +655,6 @@ proc newImage*(svg: Svg): Image {.raises: [PixieError].} =
 
           paint.opacity = props.fillOpacity * props.opacity
           paint.blendMode = blendMode
-
           result.fillPath(path, paint, props.transform, props.fillRule)
 
         blendMode = NormalBlend # Switch to normal when compositing multiple paths
